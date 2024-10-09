@@ -7,6 +7,7 @@ import unicodedata
 import warnings
 import random
 from transformers import GPT2Tokenizer
+from sklearn.model_selection import train_test_split
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
@@ -44,8 +45,22 @@ def run_preprocessing():
     preparing_finetuning_data(conversational_test_data, 'conversational_test')
 
     print(f"\nTokenizing text columns...")
-    tokenize_text_columns(conversational_train_data, ['Job Query', 'Job Description'], 'conversational_train')
-    tokenize_text_columns(conversational_test_data, ['Job Query', 'Job Description'], 'conversational_test')
+    tokenized_conversational_train_df = tokenize_text_columns(conversational_train_data, ['Job Query', 'Job Description'], 'conversational_train')
+    tokenized_conversational_test_df = tokenize_text_columns(conversational_test_data, ['Job Query', 'Job Description'], 'conversational_test')
+
+    # Step 1: Split the training data into training and validation sets
+    # Let's use 80% for training and 20% for validation
+    train_set, val_set = train_test_split(tokenized_conversational_train_df, test_size=0.2, random_state=42)
+
+    # Display the size of each set
+    print(f"Training set size: {train_set.shape}")
+    print(f"Validation set size: {val_set.shape}")
+    print(f"Test set size: {tokenized_conversational_test_df.shape}")
+
+    # Step 2: Save the split datasets to CSV files for future use
+    train_set.to_csv('train_set_for_fine_tuning.csv', index=False)
+    val_set.to_csv('validation_set_for_fine_tuning.csv', index=False)
+    tokenized_conversational_test_df.to_csv('test_set_for_evaluation.csv', index=False)
 
     print(f"\nData Preprocessing Completed. Files Saved.")
 
@@ -466,3 +481,5 @@ def tokenize_text_columns(df, columns, dfname):
     # Display a few rows to ensure everything looks correct
     print(f'\n{dfname}: ')
     print(df[['Job Query', 'Job Query_tokens', 'Job Description', 'Job Description_tokens']].head(2))
+
+    return df
