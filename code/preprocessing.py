@@ -8,61 +8,10 @@ import warnings
 import random
 from transformers import GPT2Tokenizer
 from sklearn.model_selection import train_test_split
+from transformers import pipeline
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
-
-def run_preprocessing():
-    """
-    Run all preprocessing steps, from loading the dataset to handling missing values, normalization, and tokenization.
-    This function will be invoked by the main script to perform data preprocessing.
-    """
-    print(f"\nLoading datasets...")
-    train_data, test_data = load_datasets()
-
-    print(f"\nLowercasing relevant columns...")
-    train_data_cleaned, test_data_cleaned = lowercase_text_columns(train_data, test_data)
-
-    print(f"\nRemoving duplicated rows...")
-    train_data_cleaned = remove_duplicates(train_data_cleaned)
-    test_data_cleaned = remove_duplicates(test_data_cleaned)
-
-    print(f"\nHandling missing values in salary columns...")
-    train_data_cleaned, test_data_cleaned = process_salary_imputation(train_data_cleaned, test_data_cleaned)
-
-    print(f"\nHandling punctuation, URLs, Newlines, Icons, Contractions...")
-    train_data_cleaned, test_data_cleaned = clean_datasets(train_data_cleaned, test_data_cleaned)
-
-    print(f"\nStandardizing Job Title and Location...")
-    train_data_cleaned, test_data_cleaned = handling_jobtitle_location(train_data_cleaned, test_data_cleaned)
-
-    print(f"\nCreating Query Job Pairs...")
-    conversational_train_data = create_job_query_pairs(train_data_cleaned, 'conversational_train')
-    conversational_test_data = create_job_query_pairs(test_data_cleaned, 'conversational_test')
-    
-    print(f"\nPreparing Fine Tuning Data...")
-    preparing_finetuning_data(conversational_train_data, 'conversational_train')
-    preparing_finetuning_data(conversational_test_data, 'conversational_test')
-
-    print(f"\nTokenizing text columns...")
-    tokenized_conversational_train_df = tokenize_text_columns(conversational_train_data, ['Job Query', 'Job Description'], 'conversational_train')
-    tokenized_conversational_test_df = tokenize_text_columns(conversational_test_data, ['Job Query', 'Job Description'], 'conversational_test')
-
-    # Step 1: Split the training data into training and validation sets
-    # Let's use 80% for training and 20% for validation
-    train_set, val_set = train_test_split(tokenized_conversational_train_df, test_size=0.2, random_state=42)
-
-    # Display the size of each set
-    print(f"Training set size: {train_set.shape}")
-    print(f"Validation set size: {val_set.shape}")
-    print(f"Test set size: {tokenized_conversational_test_df.shape}")
-
-    # Step 2: Save the split datasets to CSV files for future use
-    train_set.to_csv('train_set_for_fine_tuning.csv', index=False)
-    val_set.to_csv('validation_set_for_fine_tuning.csv', index=False)
-    tokenized_conversational_test_df.to_csv('test_set_for_evaluation.csv', index=False)
-
-    print(f"\nData Preprocessing Completed. Files Saved.")
 
 def load_datasets():
     """
@@ -94,6 +43,50 @@ def remove_duplicates(df):
     return df
 
 def process_salary_imputation(train_data_cleaned, test_data_cleaned):
+
+    # Format Salary
+    def convert_salary(df):
+        exchange_rate_inr_to_usd = 0.012 # current exchange rate for INR to USD
+
+        def convert_to_usd(value):
+            """Convert the value to USD based on its suffix."""
+            if 'M' in value:
+                return float(value.replace('M', '').strip()) * 1000000 * exchange_rate_inr_to_usd
+            elif 'K' in value:
+                return float(value.replace('K', '').strip()) * 1000  # Direct conversion for USD values
+            else:
+                return float(value.strip())  # Assuming it's already a numeric value
+
+        def standardize_salary(salary):
+            """Standardize the salary input to a numeric range."""
+            if isinstance(salary, str):
+                if '₹' in salary:  # Indian Rupee format
+                    salary = salary.replace('₹', '').replace(' a year', '').replace('–', '-')
+                    min_salary, max_salary = map(lambda x: convert_to_usd(x.strip()), salary.split('-'))
+                elif 'US$' in salary or '$' in salary:  # USD format
+                    salary = salary.replace('US$', '').replace('$', '').replace(' a year', '').replace('–', '-')
+                    min_salary, max_salary = map(lambda x: convert_to_usd(x.strip()), salary.split('-'))
+                else:
+                    return (np.nan, np.nan)  # Handle unexpected formats
+            else:
+                return (np.nan, np.nan)  # Handle non-string entries
+
+            return (min_salary, max_salary)
+
+        def format_salary_range(salary_range):
+            """Format the salary range into a human-readable string."""
+            if salary_range is not None:
+                min_salary, max_salary = salary_range
+                return (f"over ${min_salary/1000:.0f}K" if min_salary > 0 else "No minimum salary") + \
+                    (f" and under ${max_salary/1000:.0f}K" if max_salary > 0 else "No maximum salary")
+            return "Salary data not available"
+
+        # Step 2: Apply the standardization and formatting to the salary entries (including imputed values)
+        df['Standardized_Salary_Range'] = df['Salary'].apply(standardize_salary)
+        df['Formatted_Salary'] = df['Standardized_Salary_Range'].apply(format_salary_range)
+
+        return df
+
     """
     Process the salary column by applying salary categorization and imputation based on Job Title and Location.
     """
@@ -113,7 +106,7 @@ def process_salary_imputation(train_data_cleaned, test_data_cleaned):
             return np.nan
 
         if salary < 50000:
-            return 'Below $50K'
+            return 'under $50K'
         elif 50000 <= salary < 75000:
             return '$50K–$75K'
         elif 75000 <= salary < 100000:
@@ -121,15 +114,12 @@ def process_salary_imputation(train_data_cleaned, test_data_cleaned):
         elif 100000 <= salary < 150000:
             return '$100K–$150K'
         else:
-            return 'Above $150K'
+            return 'over $150K'
 
     # Apply salary bucket categorization for known salaries
     def apply_salary_buckets(df):
         df['Salary Bucket'] = df['Salary'].apply(categorize_salary)
         return df
-
-    train_data_cleaned = apply_salary_buckets(train_data_cleaned)
-    test_data_cleaned = apply_salary_buckets(test_data_cleaned)
 
     # 2. Imputation based on Job Title and Location
     def impute_salary_by_title_location(df):
@@ -161,7 +151,7 @@ def process_salary_imputation(train_data_cleaned, test_data_cleaned):
                 if pd.isna(row['Salary']):  # If 'Salary' is also null, assign 'Unknown'
                     return 'Unknown'
                 else:
-                    return row['Salary']  # Otherwise, take the 'Salary' value
+                    return row['Formatted_Salary']  # Otherwise, take the 'Salary' value
             return row['Imputed Salary Bucket']  # If 'Imputed Salary Bucket' is not null, keep it
 
         # Apply the logic to the entire DataFrame
@@ -171,6 +161,7 @@ def process_salary_imputation(train_data_cleaned, test_data_cleaned):
 
     # Run the entire process on both datasets
     def process_salary_imputation(df):
+        df = convert_salary(df)
         df = apply_salary_buckets(df)
         df = impute_salary_by_title_location(df)
         df = finalize_salary_imputation(df)
@@ -300,20 +291,59 @@ def handling_jobtitle_location(train_data_cleaned, test_data_cleaned):
 
     return train_data_cleaned, test_data_cleaned
 
+def summarize_columns(df):
+    # Load the summarization model from Hugging Face
+    summarizer = pipeline("summarization")
+
+    # Function to summarize text using Hugging Face summarization model
+    def summarize_description(text, max_length=130, min_length=30):
+        try:
+            summary = summarizer(text, max_length=max_length, min_length=min_length, do_sample=False)
+            return summary[0]['summary_text']
+        except Exception as e:
+            return text  # If there's an issue, return the original text
+
+    # Function to process job description
+    def process_job_description(description):
+        # Summarize the job description using the transformers model
+        summary = summarize_description(description)
+        
+        # Return only the summary
+        return summary
+    
+    def rename_columns(df):
+        df = df.drop(columns=['Resume', 'Description'])
+        
+        # Rename columns
+        df = df.rename(columns={
+            'Summarized_Resume': 'Resume',
+            'Summarized_Description': 'Description',
+        })
+    
+        return df
+    
+    # Apply the summarization function to the Resume and 'Description' columns
+    df['Summarized_Resume'] = df['Resume'].apply(process_job_description)
+    df['Summarized_Description'] = df['Description'].apply(process_job_description)
+
+    df = rename_columns(df)
+
+    return df
+
 def create_job_query_pairs(df, dfname):
 
     # List of instruction variations
     instruction_templates = [
-        "Answer the following job-related query accurately.",
-        "Provide job information based on the user's question.",
-        "Respond to the job search query with precise details.",
-        "Give detailed information in response to the job query.",
-        "Answer the user's question about job opportunities.",
-        "Provide accurate job-related details based on the user's query.",
-        "Respond to the job inquiry with relevant job information.",
-        "Give a precise response to the following job-related question.",
-        "Answer the job-related question with the required details.",
-        "Provide job search information based on the user's request."
+        "Answer the following job-related query accurately",
+        "Provide job information based on the user's question",
+        "Respond to the job search query with precise details",
+        # "Give detailed information in response to the job query",
+        # "Answer the user's question about job opportunities",
+        # "Provide accurate job-related details based on the user's query",
+        # "Respond to the job inquiry with relevant job information",
+        # "Give a precise response to the following job-related question",
+        # "Answer the job-related question with the required details",
+        # "Provide job search information based on the user's request"
     ]
 
     # List of query variations for different categories
@@ -321,52 +351,52 @@ def create_job_query_pairs(df, dfname):
         "What jobs are available for {}?",
         "Are there jobs for {}?",
         "What roles are available for {}?",
-        "Could you show me jobs for {}?",
-        "I'm looking for jobs that require {}.",
-        "Find me jobs for {} experts.",
-        "What developer jobs are available for {}?",
-        "Show me jobs requiring {} skills.",
-        "What jobs need {} skills?",
-        "Which positions are open for {}?"
+        # "Could you show me jobs for {}?",
+        # "I'm looking for jobs that require {}.",
+        # "Find me jobs for {} experts.",
+        # "What developer jobs are available for {}?",
+        # "Show me jobs requiring {} skills.",
+        # "What jobs need {} skills?",
+        # "Which positions are open for {}?"
     ]
 
     location_query_templates = [
         "What jobs are open in {}?",
         "What jobs are available in {}?",
         "Give me the information of available jobs in {}.",
-        "Are there jobs open in {}?",
-        "Any job openings in {}?",
-        "Which jobs are available in {}?",
-        "Show me jobs in {}.",
-        "What positions are open in {}?",
-        "What jobs can I find in {}?",
-        "List available jobs in {}."
+        # "Are there jobs open in {}?",
+        # "Any job openings in {}?",
+        # "Which jobs are available in {}?",
+        # "Show me jobs in {}.",
+        # "What positions are open in {}?",
+        # "What jobs can I find in {}?",
+        # "List available jobs in {}."
     ]
 
     salary_query_templates = [
         "What jobs offer a salary of {}?",
         "Which jobs pay over {}?",
         "Are there jobs with a salary of {}?",
-        "Show me jobs paying more than {}.",
-        "What jobs are available with a salary of {}?",
-        "List jobs with a salary of {}.",
-        "Any jobs offering a salary above {}?",
-        "What jobs provide a salary over {}?",
-        "Show me jobs with a salary above {}.",
-        "Find me jobs with a salary range of {}."
+        # "Show me jobs paying more than {}.",
+        # "What jobs are available with a salary of {}?",
+        # "List jobs with a salary of {}.",
+        # "Any jobs offering a salary above {}?",
+        # "What jobs provide a salary over {}?",
+        # "Show me jobs with a salary above {}.",
+        # "Find me jobs with a salary range of {}."
     ]
 
     experience_query_templates = [
         "What jobs are available for someone with {} years of experience?",
         "What roles can I find for someone with {} years of experience?",
         "Are there jobs for candidates with {} years of experience?",
-        "Show me jobs for someone with {} years of development experience.",
-        "What jobs are available for an experienced {}?",
-        "Find me jobs for professionals with {} years of experience.",
-        "Which jobs require {} years of experience?",
-        "What positions are available for someone with {} years in management?",
-        "List jobs for people with {} years of experience.",
-        "Are there positions for someone with {} years of experience?"
+        # "Show me jobs for someone with {} years of development experience.",
+        # "What jobs are available for an experienced {}?",
+        # "Find me jobs for professionals with {} years of experience.",
+        # "Which jobs require {} years of experience?",
+        # "What positions are available for someone with {} years in management?",
+        # "List jobs for people with {} years of experience.",
+        # "Are there positions for someone with {} years of experience?"
     ]
 
     # Function to generate varied instructions
@@ -377,7 +407,7 @@ def create_job_query_pairs(df, dfname):
     def generate_all_queries(row, query_type):
         queries = []
         if query_type == 'skills':
-            skill_info = row['Resume'] + " and " + row['Description']
+            skill_info = row['Resume']
             for template in skills_query_templates:
                 queries.append(template.format(skill_info))
         elif query_type == 'location':
@@ -389,7 +419,7 @@ def create_job_query_pairs(df, dfname):
             for template in salary_query_templates:
                 queries.append(template.format(salary))
         elif query_type == 'experience':
-            experience = row['Description']  # Assume experience is described in the 'Description' column
+            experience = row['Description']
             for template in experience_query_templates:
                 queries.append(template.format(experience))
         return queries
@@ -399,16 +429,16 @@ def create_job_query_pairs(df, dfname):
         descriptions = []
         if query_type == 'location':
             for _ in location_query_templates:
-                descriptions.append(f"Job available in {row['Location']}\nJob-Title: {row['Job-Title']}\nSalary: {row['Imputed Salary']}\nResume: {row['Resume']}\nDescription: {row['Description']}")
+                descriptions.append(f"Job available in {row['Location']}\nJob-Title: {row['Job-Title']}\nSalary: {row['Imputed Salary']}\nDescription: {row['Description']}")
         elif query_type == 'skills':
             for _ in skills_query_templates:
-                descriptions.append(f"Job available for {row['Resume']}\nLocation: {row['Location']}\nSalary: {row['Imputed Salary']}\nJob-Title: {row['Job-Title']}\nDescription: {row['Description']}")
+                descriptions.append(f"Job available in Location: {row['Location']}\nSalary: {row['Imputed Salary']}\nJob-Title: {row['Job-Title']}\nDescription: {row['Description']}")
         elif query_type == 'salary':
             for _ in salary_query_templates:
-                descriptions.append(f"Job available with a salary of {row['Imputed Salary']}\nLocation: {row['Location']}\nJob-Title: {row['Job-Title']}\nResume: {row['Resume']}\nDescription: {row['Description']}")
+                descriptions.append(f"Job available with a salary of {row['Imputed Salary']}\nLocation: {row['Location']}\nJob-Title: {row['Job-Title']}\nDescription: {row['Description']}")
         elif query_type == 'experience':
             for _ in experience_query_templates:
-                descriptions.append(f"Job available for someone with {row['Description']}\nLocation: {row['Location']}\nJob-Title: {row['Job-Title']}\nSalary: {row['Imputed Salary']}\nResume: {row['Resume']}")
+                descriptions.append(f"Job available in Location: {row['Location']}\nJob-Title: {row['Job-Title']}\nSalary: {row['Imputed Salary']}\nDescription: {row['Description']}")
         return descriptions
 
     # Combine everything into a final function that prepares the dataset with all variations
@@ -445,7 +475,7 @@ def create_job_query_pairs(df, dfname):
     print(f'{dfname} has been created with shape: {conversational_df.shape}')
 
     # Save the dataset to a CSV file
-    conversational_df.to_csv(f'{dfname}.csv', index=False)
+    conversational_df.to_csv(f'data/{dfname}.csv', index=False, encoding='utf-8')
 
     return conversational_df
 
@@ -462,12 +492,13 @@ def preparing_finetuning_data(df, dfname):
     # Save the query-description pairs to a CSV or any suitable format for fine-tuning
     fine_tuning_data = pd.DataFrame(query_description_pairs, columns=['Job Query', 'Job Description'])
 
-    # # Save to CSV for inspection or later use
-    # fine_tuning_data.to_csv('fine_tuning_job_query_description_pairs.csv', index=False)
+    # Save to CSV for inspection or later use
+    fine_tuning_data.to_csv(f'data/fine_tuning_job_query_{dfname}.csv', index=False, encoding='utf-8')
 
     # Display a few rows to ensure everything looks correct
     print(f'\n{dfname}: ')
     print(fine_tuning_data.head(2))
+    print(fine_tuning_data.columns)
 
 def tokenize_text_columns(df, columns, dfname):
     """
@@ -481,5 +512,63 @@ def tokenize_text_columns(df, columns, dfname):
     # Display a few rows to ensure everything looks correct
     print(f'\n{dfname}: ')
     print(df[['Job Query', 'Job Query_tokens', 'Job Description', 'Job Description_tokens']].head(2))
+    print(df.columns)
 
     return df
+
+def run_preprocessing(summarization):
+    """
+    Run all preprocessing steps, from loading the dataset to handling missing values, normalization, and tokenization.
+    This function will be invoked by the main script to perform data preprocessing.
+    """
+    print(f"\nLoading datasets...")
+    train_data, test_data = load_datasets()
+    print(f'train-1.csv -> {train_data.shape} and ', f'test-1.csv -> {test_data.shape}')
+
+    print(f"\nLowercasing relevant columns...")
+    train_data_cleaned, test_data_cleaned = lowercase_text_columns(train_data, test_data)
+
+    print(f"\nRemoving duplicated rows...")
+    train_data_cleaned = remove_duplicates(train_data_cleaned)
+    test_data_cleaned = remove_duplicates(test_data_cleaned)
+
+    print(f"\nHandling missing values in salary columns...")
+    train_data_cleaned, test_data_cleaned = process_salary_imputation(train_data_cleaned, test_data_cleaned)
+
+    print(f"\nHandling punctuation, URLs, Newlines, Icons, Contractions...")
+    train_data_cleaned, test_data_cleaned = clean_datasets(train_data_cleaned, test_data_cleaned)
+
+    print(f"\nStandardizing Job Title and Location...")
+    train_data_cleaned, test_data_cleaned = handling_jobtitle_location(train_data_cleaned, test_data_cleaned)
+
+    if summarization:
+        print(f"\nSummarizing Text in Completed")
+        train_data_cleaned = summarize_columns(train_data_cleaned)
+        test_data_cleaned = summarize_columns(test_data_cleaned)
+
+    print(f"\nCreating Query Job Pairs...")
+    conversational_train_data = create_job_query_pairs(train_data_cleaned, 'conversational_train')
+    conversational_test_data = create_job_query_pairs(test_data_cleaned, 'conversational_test')
+    
+    print(f"\nPreparing Fine Tuning Data...")
+    preparing_finetuning_data(conversational_train_data, 'conversational_train')
+    preparing_finetuning_data(conversational_test_data, 'conversational_test')
+
+    print(f"\nTokenizing text columns...")
+    tokenized_conversational_train_df = tokenize_text_columns(conversational_train_data, ['Job Query', 'Job Description'], 'conversational_train')
+    tokenized_conversational_test_df = tokenize_text_columns(conversational_test_data, ['Job Query', 'Job Description'], 'conversational_test')
+
+    # Split the training data into training and validation sets
+    train_set, val_set = train_test_split(tokenized_conversational_train_df, test_size=0.2, random_state=42)
+
+    # Display the size of each set
+    print(f"Training set size: {train_set.shape}")
+    print(f"Validation set size: {val_set.shape}")
+    print(f"Test set size: {tokenized_conversational_test_df.shape}")
+
+    # Step 2: Save the split datasets to CSV files for future use
+    train_set.to_csv('data/train_set_for_fine_tuning.csv', index=False, encoding='utf-8')
+    val_set.to_csv('data/validation_set_for_fine_tuning.csv', index=False, encoding='utf-8')
+    tokenized_conversational_test_df.to_csv('data/test_set_for_evaluation.csv', index=False, encoding='utf-8')
+
+    print(f"\nData Preprocessing Completed. Files Saved.\n")
