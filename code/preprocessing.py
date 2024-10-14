@@ -15,7 +15,10 @@ warnings.filterwarnings('ignore')
 
 def load_datasets():
     """
-    Load the train and test datasets.
+    Load the train and test datasets from CSV files.
+    
+    Returns:
+        tuple: A tuple containing the training and testing DataFrames.
     """
     train_data = pd.read_csv('data/train-1.csv')
     test_data = pd.read_csv('data/test-1.csv')
@@ -23,7 +26,14 @@ def load_datasets():
 
 def lowercase_text_columns(train_df, test_df):
     """
-    Lowercase the text in 'Resume', 'Job-Title', 'Location', and 'Description' columns.
+    Convert text in specified columns to lowercase.
+    
+    Parameters:
+        train_df (DataFrame): The training DataFrame.
+        test_df (DataFrame): The testing DataFrame.
+    
+    Returns:
+        tuple: A tuple of the modified training and testing DataFrames.
     """
     columns_to_lowercase = ['Resume', 'Job-Title', 'Description', 'Location']
     for col in columns_to_lowercase:
@@ -33,7 +43,13 @@ def lowercase_text_columns(train_df, test_df):
 
 def remove_duplicates(df):
     """
-    Check for and remove duplicate rows across all columns in the dataset.
+    Check for and remove duplicate rows in the DataFrame.
+    
+    Parameters:
+        df (DataFrame): The DataFrame to check for duplicates.
+    
+    Returns:
+        DataFrame: The DataFrame with duplicates removed, if any.
     """
     duplicates = df.duplicated()
     print(f">> Number of duplicate rows: {duplicates.sum()}")
@@ -43,7 +59,16 @@ def remove_duplicates(df):
     return df
 
 def process_salary_imputation(train_data_cleaned, test_data_cleaned):
-
+    """
+    Process the salary column by standardizing and imputing missing values.
+    
+    Parameters:
+        train_data_cleaned (DataFrame): The cleaned training DataFrame.
+        test_data_cleaned (DataFrame): The cleaned testing DataFrame.
+    
+    Returns:
+        tuple: A tuple of the processed training and testing DataFrames.
+    """
     # Format Salary
     def convert_salary(df):
         exchange_rate_inr_to_usd = 0.012 # current exchange rate for INR to USD
@@ -94,7 +119,12 @@ def process_salary_imputation(train_data_cleaned, test_data_cleaned):
     def categorize_salary(salary):
         """
         Convert salary values to general buckets for ease of classification.
-        Example: $50K–$75K, $75K–$100K, etc.
+        
+        Parameters:
+            salary (str): The salary value to categorize.
+        
+        Returns:
+            str: The categorized salary bucket.
         """
         salary = str(salary).replace(',', '').replace('$', '').replace('₹', '').strip()
 
@@ -125,6 +155,12 @@ def process_salary_imputation(train_data_cleaned, test_data_cleaned):
     def impute_salary_by_title_location(df):
         """
         Impute missing salary values based on median salary for the same Job Title and Location.
+        
+        Parameters:
+            df (DataFrame): The DataFrame containing salary data.
+        
+        Returns:
+            DataFrame: The DataFrame with imputed salary values.
         """
         # Group by Job Title and Location to compute median salary bucket
         salary_mapping = df.groupby(['Job-Title', 'Location'])['Salary Bucket'].apply(lambda x: x.mode()[0] if not x.mode().empty else np.nan).to_dict()
@@ -145,6 +181,12 @@ def process_salary_imputation(train_data_cleaned, test_data_cleaned):
         - If 'Imputed Salary Bucket' is null, check the 'Salary' column.
         - If 'Salary' is null, fill 'Imputed Salary Bucket' with 'Unknown'.
         - If 'Salary' is not null, take the value from 'Salary' and assign it to 'Imputed Salary Bucket'.
+        
+        Parameters:
+            df (DataFrame): The DataFrame with salary data.
+        
+        Returns:
+            DataFrame: The DataFrame with finalized imputed salary values.
         """
         def fill_imputed_salary(row):
             if pd.isna(row['Imputed Salary Bucket']):  # If 'Imputed Salary Bucket' is null

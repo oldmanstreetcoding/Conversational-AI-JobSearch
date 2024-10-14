@@ -1,96 +1,127 @@
+# model_selection.py
+
+import time
 import pandas as pd
-import torch
+# from unsloth import FastLanguageModel
+# from datasets import Dataset
+# from unsloth.chat_templates import get_chat_template
+# from transformers import TextStreamer
 
-from unsloth import FastLanguageModel
-from datasets import Dataset
+def load_model():
+    """
+    Load the base model (Phi-3.5-mini-instruct) for fine-tuning.
+    
+    Returns:
+        model: Loaded language model.
+        tokenizer: Corresponding tokenizer for the model.
+    """
+    base_model = "unsloth/Phi-3.5-mini-instruct"
 
-def define_base_model():
-    print('model selection')
-    # # Check if CUDA is available and set the device accordingly
-    # if torch.cuda.is_available():
-    #     device = torch.device("cuda")
-    #     print("CUDA is available. Using GPU.")
-    # else:
-    #     device = torch.device("cpu")
-    #     print("CUDA is not available. Using CPU.")
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=base_model,
+        max_seq_length=2048,  # Change based on your hardware capabilities
+        dtype=None,  # Use auto detection
+        load_in_4bit=True,  # For memory optimization
+    )
+    
+    return model, tokenizer
 
-    # # Patch `FastLanguageModel` to avoid CUDA initialization if it's not available
-    # if device.type == "cpu":
-    #     # Prevent FastLanguageModel from checking CUDA capabilities
-    #     torch.cuda.get_device_capability = lambda: (0, 0)  # Dummy function to bypass CUDA checks
+def load_datasets(train_path, test_path):
+    """
+    Load training and testing datasets from specified CSV files.
+    
+    Parameters:
+        train_path (str): Path to the training dataset.
+        test_path (str): Path to the testing dataset.
+    
+    Returns:
+        tuple: DataFrames for training and testing datasets.
+    """
+    train_df = pd.read_csv(train_path, encoding='utf-8')
+    test_df = pd.read_csv(test_path, encoding='utf-8')
+    
+    return train_df, test_df
 
-    # # Load the base model (Phi-3.5-mini-instruct)
-    # model_name = "unsloth/Phi-3.5-mini-instruct"
+def format_datasets(train_df, test_df, tokenizer):
+    """
+    Prepare datasets for model training by formatting inputs.
+    
+    Parameters:
+        train_df (DataFrame): DataFrame containing training data.
+        test_df (DataFrame): DataFrame containing testing data.
+        tokenizer: Tokenizer for the model.
+    
+    Returns:
+        tuple: Formatted datasets for training and testing.
+    """
+    train_dataset = Dataset.from_pandas(train_df)
+    test_dataset = Dataset.from_pandas(test_df)
 
-    # model, tokenizer = FastLanguageModel.from_pretrained(
-    #     model_name=model_name,
-    #     max_seq_length=2048, # Change based on your hardware capabilities
-    #     dtype=None, # Use auto detection
-    #     load_in_4bit=True, # For memory optimization
-    # )
+    # Apply chat template for conversation-style input
+    tokenizer = get_chat_template(
+        tokenizer,
+        chat_template="phi-3",  # Custom chat template for Phi-3
+        mapping={"role": "from", "content": "value", "user": "human", "assistant": "gpt"},
+    )
 
-    # # Unsloth 2024.9.post4 patched 32 layers with 32 QKV layers, 32 O layers and 32 MLP layers.
-    # model = FastLanguageModel.get_peft_model(
-    #     model,
-    #     r=16,  # Low-rank adaptation dimension
-    #     target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],  # Layers for LoRA
-    #     lora_alpha=16,  # Scaling factor
-    #     lora_dropout=0,  # No dropout for faster training
-    #     bias="none",  # No additional bias terms
-    #     random_state=3407,  # For reproducibility
-    #     loftq_config=None,  # No specific LoFTQ configuration
-    # )
+    # Format prompts for training using the Job Query and Job Description columns
+    def formatting_prompts_func(examples):
+        convos = [
+            {"from": "human", "value": examples["Job Query"].strip()},
+            {"from": "gpt", "value": examples["Job Description"].strip()},
+        ]
+        formatted_text = tokenizer.apply_chat_template(convos, tokenize=False, add_generation_prompt=False)
+        return {"text": formatted_text}
 
-    # # Load train and test datasets
-    # train_df = pd.read_csv('/content/drive/MyDrive/NLX Data/conversational_train.csv', encoding='utf-8')
-    # test_df = pd.read_csv('/content/drive/MyDrive/NLX Data/conversational_test.csv', encoding='utf-8')
+    formatted_train_dataset = train_dataset.map(formatting_prompts_func, batched=False)
+    formatted_test_dataset = test_dataset.map(formatting_prompts_func, batched=False)
 
-    # # Prepare datasets as HuggingFace Dataset objects
-    # train_dataset = Dataset.from_pandas(train_df)
-    # test_dataset = Dataset.from_pandas(test_df)
+    return formatted_train_dataset, formatted_test_dataset
 
-    # from unsloth.chat_templates import get_chat_template
+def tokenize_datasets(formatted_train_dataset, formatted_test_dataset, tokenizer):
+    """
+    Tokenize the formatted datasets for model input.
+    
+    Parameters:
+        formatted_train_dataset (Dataset): The formatted training dataset.
+        formatted_test_dataset (Dataset): The formatted testing dataset.
+        tokenizer: Tokenizer for the model.
+    
+    Returns:
+        tuple: Tokenized datasets for training and testing.
+    """
+    def tokenize_and_prepare_inputs(examples):
+        tokenized = tokenizer(
+            examples["text"],
+            padding=True,
+            truncation=True,
+            return_tensors="pt",
+            return_attention_mask=True
+        )
+        return {
+            "input_ids": tokenized["input_ids"].tolist(),
+            "attention_mask": tokenized["attention_mask"].tolist()
+        }
 
-    # # Apply the chat template for conversation-style input
-    # tokenizer = get_chat_template(
-    #     tokenizer,
-    #     chat_template="phi-3",  # Custom chat template for Phi-3
-    #     mapping={"role": "from", "content": "value", "user": "human", "assistant": "gpt"},
-    # )
+    tokenized_train_dataset = formatted_train_dataset.map(tokenize_and_prepare_inputs, batched=True)
+    tokenized_test_dataset = formatted_test_dataset.map(tokenize_and_prepare_inputs, batched=True)
 
-    # # Function to format prompts for training using the Job Query and Job Description columns
-    # def formatting_prompts_func(examples):
-    #     # Create a conversation from the Job Query and Job Description
-    #     convos = [
-    #         {"from": "human", "value": examples["Job Query"].strip()},
-    #         {"from": "gpt", "value": examples["Job Description"].strip()},
-    #     ]
+    return tokenized_train_dataset, tokenized_test_dataset
 
-    #     # Format the conversation as a text prompt using the chat template
-    #     formatted_text = tokenizer.apply_chat_template(convos, tokenize=False, add_generation_prompt=False)
+def define_base_model(train_path, test_path):
+    """
+    Define the base model and prepare datasets for fine-tuning.
+    
+    Parameters:
+        train_path (str): Path to the training dataset CSV file.
+        test_path (str): Path to the testing dataset CSV file.
+    
+    Returns:
+        tuple: Tokenized training and testing datasets, and the model.
+    """
+    model, tokenizer = load_model()
+    train_df, test_df = load_datasets(train_path, test_path)
+    formatted_train_dataset, formatted_test_dataset = format_datasets(train_df, test_df, tokenizer)
+    tokenized_train_dataset, tokenized_test_dataset = tokenize_datasets(formatted_train_dataset, formatted_test_dataset, tokenizer)
 
-    #     return {"text": formatted_text}
-
-    # # Apply the formatting function to each row of the dataset
-    # formatted_train_dataset = train_dataset.map(formatting_prompts_func, batched=False)
-    # formatted_test_dataset = test_dataset.map(formatting_prompts_func, batched=False)
-
-    # # Tokenize the dataset for model input
-    # def tokenize_and_prepare_inputs(examples):
-    #     tokenized = tokenizer(
-    #         examples["text"],
-    #         padding=True,
-    #         truncation=True,
-    #         return_tensors="pt",
-    #         return_attention_mask=True
-    #     )
-    #     return {
-    #         "input_ids": tokenized["input_ids"].tolist(),
-    #         "attention_mask": tokenized["attention_mask"].tolist()
-    #     }
-
-    # # Apply tokenization to training and test datasets
-    # tokenized_train_dataset = formatted_train_dataset.map(tokenize_and_prepare_inputs, batched=True)
-    # tokenized_test_dataset = formatted_test_dataset.map(tokenize_and_prepare_inputs, batched=True)
-
-    # return model, tokenizer, tokenized_train_dataset
+    return tokenized_train_dataset, tokenized_test_dataset, model
